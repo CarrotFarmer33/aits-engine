@@ -94,11 +94,12 @@ def chem_segments(src):
     for pi, page in enumerate(src):
         ws = page.get_text("words")
         for w in ws:
-            if re.fullmatch(r"\d{1,3}\.?", w[4]) and 68 < w[0] < 78 and SRC_TOP < w[1] < SRC_BOT:
-                cands.append((pi, w[1], int(w[4].rstrip("."))))
-            if w[4] in ("Physics", "Chemistry", "Mathematics") and w[1] < 100 and w[3] - w[1] > 10:
+            if re.fullmatch(r"\d{1,3}\.?", w[4]) and 60 < w[0] < 92 and SRC_TOP < w[1] < SRC_BOT:
+                cands.append((pi, w[1], int(w[4].rstrip(".")), w[0]))
+            if w[4].lower() in ("physics", "chemistry", "mathematics", "maths") and w[1] < 160 and w[3] - w[1] > 9:
                 stops[pi].append(w[1] - 2)
-                heads.append((pi, w[1], w[4].lower()))
+                sub_norm = "mathematics" if w[4].lower() in ("mathematics", "maths") else w[4].lower()
+                heads.append((pi, w[1], sub_norm))
         for i in range(len(ws) - 2):
             a, b, c = ws[i], ws[i + 1], ws[i + 2]
             if (a[4], b[4], c[4]) == ("Space", "for", "Rough"):
@@ -124,7 +125,7 @@ def chem_segments(src):
     first_page = min(has_instr) if has_instr else 0
     cands = sorted(c for c in cands if c[0] >= first_page)
     chain, prev, prev_pos = [], None, None
-    for i, (pi, y, n) in enumerate(cands):
+    for i, (pi, y, n, q_x0) in enumerate(cands):
         take = False
         if prev is None:
             take = n == 1
@@ -134,7 +135,7 @@ def chem_segments(src):
                 and any(prev_pos < (h[0], h[1]) < (pi, y) for h in heads):
             take = True                                        # new subject, numbering starts again
         if take:
-            chain.append((pi, y, n)); prev, prev_pos = n, (pi, y)
+            chain.append((pi, y, n, q_x0)); prev, prev_pos = n, (pi, y)
 
     def subject_at(pi, y):
         cur = None
@@ -143,10 +144,42 @@ def chem_segments(src):
                 cur = h[2]
         return cur
 
+    page_data = {}
+    for pi, page in enumerate(src):
+        ws = page.get_text("words")
+        drs = page.get_drawings()
+        page_data[pi] = (ws, drs)
+
     segs, segs_any = {}, {}
-    for k, (pi, y, n) in enumerate(chain):
+    page_last_ink = {}
+    for k, (pi, y, n, q_x0) in enumerate(chain):
         nxt = chain[k + 1] if k + 1 < len(chain) else None
-        parts, p, y0 = [], pi, y - 4
+        
+        # Determine safe upper bound on page pi
+        if pi in page_last_ink:
+            min_top = page_last_ink[pi] + 2
+        else:
+            prior_stops = [s for s in stops.get(pi, []) if s < y - 4]
+            min_top = max(prior_stops) + 2 if prior_stops else SRC_TOP
+
+        ws, drs = page_data[pi]
+        body_x0 = q_x0 + 8
+        # Include tall math / equations that sit above y (up to 30pt above y)
+        tall_words = [
+            w[1] for w in ws 
+            if w[0] > body_x0 and min_top <= w[1] <= y + 2 and w[1] >= y - 30
+        ]
+        tall_drawings = [
+            d["rect"].y0 for d in drs 
+            if d["rect"].x0 > body_x0 and d["rect"].width < 400 and d["rect"].height < 40
+            and min_top <= d["rect"].y0 <= y + 2 and d["rect"].y0 >= y - 30
+        ]
+        
+        candidates = tall_words + tall_drawings + [y]
+        math_top = min(candidates)
+        y0 = max(min_top, math_top - 4)
+
+        parts, p = [], pi
         while True:
             nq_here = nxt is not None and nxt[0] == p
             lim = (nxt[1] - 4) if nq_here else SRC_BOT
@@ -163,6 +196,7 @@ def chem_segments(src):
             t = tight(src[pp], a, b)
             if t is not None:
                 trimmed.append((pp, a, t))
+                page_last_ink[pp] = max(page_last_ink.get(pp, 0), t)
         segs.setdefault((subject_at(pi, y), n), trimmed)
         segs_any.setdefault(n, trimmed)
     return segs, segs_any
