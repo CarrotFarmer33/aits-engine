@@ -7,6 +7,8 @@ margin/header banners are automatically removed.
 
 For JEE Main pattern:
 Strictly generates 25 Single Choice Questions (SCQ / Section A) and 5 Numerical Type (NAT / Section B) per subject.
+
+Optimized with O(1) pre-computed segments cache for sub-second test generation.
 """
 
 import argparse
@@ -88,8 +90,10 @@ class QuestionManager:
         self.nkeys = {}      # stem -> normalized stem
         self.doc_cache = {}  # stem -> (doc, by_sub, by_no)
         self.sol_cache = {}  # stem -> (doc, s_sub, s_no)
+        self.segments_cache = {}
         self._load_databases()
         self._index_pdfs()
+        self._load_segments_cache()
 
     def _load_databases(self):
         t0 = time.time()
@@ -134,6 +138,19 @@ class QuestionManager:
 
         print(f"Indexed {len(self.pdfs)} question PDFs, {len(self.sol_files)} solution PDFs in {time.time()-t0:.2f}s")
 
+    def _load_segments_cache(self):
+        cache_path = os.path.join(ROOT_DIR, "segments_cache.json")
+        if os.path.exists(cache_path):
+            try:
+                t0 = time.time()
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    self.segments_cache = json.load(f)
+                q_count = len(self.segments_cache.get("questions", {}))
+                s_count = len(self.segments_cache.get("solutions", {}))
+                print(f"Loaded instant segments cache ({q_count} questions, {s_count} solutions) in {time.time()-t0:.2f}s")
+            except Exception as e:
+                print(f"Warning: could not load segments_cache.json: {e}")
+
     def find_pdf_key(self, q):
         hay = (
             norm(q.get("zipName")),
@@ -166,7 +183,7 @@ def build_test_pdf(
     out_pdf=None,
     shuffle=True
 ):
-    """Builds a vector test PDF matching the exact build_sheets format."""
+    """Builds a vector test PDF with sub-second generation using pre-computed segments cache."""
     qm = QuestionManager.get_instance()
 
     # 1. Filter candidates
@@ -277,7 +294,7 @@ def build_test_pdf(
                 random.seed(int(time.time() * 1000) % 100000)
                 random.shuffle(matched)
 
-            # Paper clustering for speed: cluster candidates by source paper
+            # Paper clustering for variety and speed
             by_paper = collections.defaultdict(list)
             for q in matched:
                 k = qm.find_pdf_key(q)
@@ -305,7 +322,7 @@ def build_test_pdf(
 
     # Filter to questions that actually have matching PDFs
     valid_candidates = []
-    pool_limit = max(target_count * 3, len(matched)) if target_count else len(matched)
+    pool_limit = max((target_count or 30) * 2, 20)
     for q in matched:
         key = qm.find_pdf_key(q)
         if key:
@@ -316,22 +333,65 @@ def build_test_pdf(
     if not valid_candidates:
         raise ValueError("Could not find source papers for the selected questions.")
 
-    # 2. Open documents and segment questions
+    # 2. Document & Segment cache helpers
+    doc_cache = {}
+    seg_cache = {}
+    sol_cache = {}
+
+    def get_segments_for_question(key):
+        if key in seg_cache:
+            return seg_cache[key]
+        
+        # 1. Check pre-computed segments cache (instant O(1))
+        q_cache = qm.segments_cache.get("questions", {})
+        if key in q_cache:
+            sub_d = {tuple(k.split("||", 1)): parts for k, parts in q_cache[key]["by_sub"].items()}
+            no_d = {int(k): parts for k, parts in q_cache[key]["by_no"].items()}
+            seg_cache[key] = (sub_d, no_d)
+            return seg_cache[key]
+
+        # 2. Fallback: on-the-fly scan
+        if key not in doc_cache:
+            doc_cache[key] = open_pdf(qm.pdfs[key])
+        doc = doc_cache[key]
+        if doc:
+            try:
+                sub_d, no_d = chem_segments(doc)
+            except Exception:
+                sub_d, no_d = {}, {}
+            seg_cache[key] = (sub_d, no_d)
+        else:
+            seg_cache[key] = ({}, {})
+        return seg_cache[key]
+
     def get_sol(k):
         if k not in qm.sol_paths:
             return None
-        if k in qm.sol_cache:
-            return qm.sol_cache[k]
+        if k in sol_cache:
+            return sol_cache[k]
+        
+        sol_stem = os.path.splitext(os.path.basename(qm.sol_paths[k]))[0]
+        s_cache = qm.segments_cache.get("solutions", {})
+        
+        # 1. Check pre-computed segments cache (instant O(1))
+        if sol_stem in s_cache:
+            s_sub = {tuple(s.split("||", 1)): parts for s, parts in s_cache[sol_stem]["by_sub"].items()}
+            s_no = {int(s): parts for s, parts in s_cache[sol_stem]["by_no"].items()}
+            sol_doc = open_pdf(qm.sol_paths[k])
+            sol_cache[k] = (sol_doc, s_sub, s_no)
+            return sol_cache[k]
+
+        # 2. Fallback: on-the-fly scan
         sol_doc = open_pdf(qm.sol_paths[k])
         if sol_doc:
             try:
                 s_sub, s_no = chem_segments(sol_doc)
-                qm.sol_cache[k] = (sol_doc, s_sub, s_no)
+                sol_cache[k] = (sol_doc, s_sub, s_no)
             except Exception:
-                qm.sol_cache[k] = None
+                sol_cache[k] = None
         else:
-            qm.sol_cache[k] = None
-        return qm.sol_cache[k]
+            sol_cache[k] = None
+        return sol_cache[k]
 
     placed_questions = []  # (q, key, doc, parts, qno)
     placed_counts = collections.defaultdict(lambda: {"scq": 0, "nat": 0})
@@ -349,27 +409,18 @@ def build_test_pdf(
         elif target_count and len(placed_questions) >= target_count:
             break
 
-        if key in qm.doc_cache:
-            doc, by_sub, by_no = qm.doc_cache[key]
-        else:
-            doc = open_pdf(qm.pdfs[key])
-            if doc:
-                try:
-                    by_sub, by_no = chem_segments(doc)
-                except Exception:
-                    by_sub, by_no = {}, {}
-                qm.doc_cache[key] = (doc, by_sub, by_no)
-            else:
-                qm.doc_cache[key] = (None, {}, {})
-                doc, by_sub, by_no = None, {}, {}
-
-        if not doc:
-            continue
+        by_sub, by_no = get_segments_for_question(key)
         qno = q.get("questionNumber") or q.get("number") or 1
         sub_name = str(q.get("subject", "")).strip().lower()
 
         parts = by_sub.get((sub_name, qno)) or by_no.get(qno)
         if not parts:
+            continue
+
+        if key not in doc_cache:
+            doc_cache[key] = open_pdf(qm.pdfs[key])
+        doc = doc_cache[key]
+        if not doc:
             continue
 
         placed_questions.append((q, key, doc, parts, qno))

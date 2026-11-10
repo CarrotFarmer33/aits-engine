@@ -6,8 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source PDFs, databases, and application code
+# Copy source PDFs, databases, pre-computed segments cache, and application code
 COPY database.json chemistry_database.json maths_advanced_database.json maths_main_database.json ./
+COPY segments_cache.json ./
 COPY build_sheets.py build_chem_sheets.py build_vector_test.py server.py ./
 COPY source/ ./source/
 
