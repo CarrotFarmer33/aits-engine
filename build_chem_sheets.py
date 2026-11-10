@@ -90,6 +90,11 @@ def chem_segments(src):
       * every question remembers which subject heading it sits under, so Chemistry Q5 and
         Physics Q5 of such a paper are told apart.
     """
+    # Footer cutoff: anything at or below this y is treated as a running footer/page number
+    # and excluded from question content.  718 catches most FIITJEE running footers
+    # (paper title, page number, branding) while keeping all question text.
+    FOOTER_CUT = 718.0
+
     cands, stops, has_instr, heads = [], collections.defaultdict(list), [], []
     for pi, page in enumerate(src):
         ws = page.get_text("words")
@@ -100,6 +105,11 @@ def chem_segments(src):
                 stops[pi].append(w[1] - 2)
                 sub_norm = "mathematics" if w[4].lower() in ("mathematics", "maths") else w[4].lower()
                 heads.append((pi, w[1], sub_norm))
+            # Detect running footer text near the bottom of the page (page numbers,
+            # paper title repeats, "FIITJEE" branding) and register as a stop so they
+            # never bleed into the preceding question's crop.
+            if w[1] >= FOOTER_CUT and CROP_X0 <= w[0] <= CROP_X1:
+                stops[pi].append(FOOTER_CUT - 2)
         for i in range(len(ws) - 2):
             a, b, c = ws[i], ws[i + 1], ws[i + 2]
             if (a[4], b[4], c[4]) == ("Space", "for", "Rough"):
@@ -118,7 +128,7 @@ def chem_segments(src):
                         top = min(top, min(w[1] for w in lw))
                 stops[pi].append(top - 3)
     for pi in stops:
-        stops[pi] = sorted(stops[pi])
+        stops[pi] = sorted(set(stops[pi]))   # deduplicate: footer stops may be added multiple times
     heads.sort()
 
     # keep only the 1,2,3,... chain, starting on the first page with questions
@@ -164,15 +174,18 @@ def chem_segments(src):
 
         ws, drs = page_data[pi]
         body_x0 = q_x0 + 8
-        # Include tall math / equations that sit above y (up to 30pt above y)
+        # Include tall math / equations / reaction diagrams that sit above y.
+        # MATH_LOOKBACK=75 covers reaction arrows, multi-line equations, and
+        # structural formula rows that can span 50-70 pt above the question number.
+        MATH_LOOKBACK = 75
         tall_words = [
-            w[1] for w in ws 
-            if w[0] > body_x0 and min_top <= w[1] <= y + 2 and w[1] >= y - 30
+            w[1] for w in ws
+            if w[0] > body_x0 and min_top <= w[1] <= y + 2 and w[1] >= y - MATH_LOOKBACK
         ]
         tall_drawings = [
-            d["rect"].y0 for d in drs 
-            if d["rect"].x0 > body_x0 and d["rect"].width < 400 and d["rect"].height < 40
-            and min_top <= d["rect"].y0 <= y + 2 and d["rect"].y0 >= y - 30
+            d["rect"].y0 for d in drs
+            if d["rect"].x0 > body_x0 and d["rect"].width < 450  # wider: catches reaction arrows
+            and min_top <= d["rect"].y0 <= y + 2 and d["rect"].y0 >= y - MATH_LOOKBACK
         ]
         
         candidates = tall_words + tall_drawings + [y]

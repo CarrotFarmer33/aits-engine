@@ -88,6 +88,117 @@ def tight(page, y0, y1):
     return None if low is None else min(y1, low + 3)
 
 
+def get_ink_bounds(page, y0, y1, x0=CROP_X0, x1=CROP_X1):
+    """Return (min_x, max_x) of ink inside [x0, y0, x1, y1]."""
+    clip = fitz.Rect(x0, y0, x1, y1)
+    max_x = x0 + 80
+    min_x = x1
+    for w in page.get_text("words"):
+        r = fitz.Rect(w[:4])
+        if r.intersects(clip):
+            max_x = max(max_x, min(r.x1, x1))
+            min_x = min(min_x, max(r.x0, x0))
+    for dr in page.get_drawings():
+        r = dr["rect"]
+        if r.intersects(clip) and r.width < 440:
+            max_x = max(max_x, min(r.x1, x1))
+            min_x = min(min_x, max(r.x0, x0))
+    for im in page.get_image_info():
+        r = fitz.Rect(im["bbox"])
+        if r.intersects(clip):
+            max_x = max(max_x, min(r.x1, x1))
+            min_x = min(min_x, max(r.x0, x0))
+    return min_x, max_x
+
+
+def detect_vertical_big_options(src, parts, x0=CROP_X0, x1=CROP_X1):
+    """Detect if question has 1-column vertically-stacked big options (A)-(D).
+    Returns (stem_parts, opt_slices) if so, else None.
+    """
+    all_cand_opts = []
+    for pi, y0, y1 in parts:
+        page = src[pi]
+        for w in page.get_text("words"):
+            if (y0 - 2 <= w[1] <= y1 + 2) and (x0 - 5 <= w[0] <= x1):
+                m = re.fullmatch(r"\(([A-D])\)", w[4])
+                if m:
+                    all_cand_opts.append((pi, m.group(1), w[0], w[1], w[2], w[3]))
+    
+    by_letter = {}
+    for item in all_cand_opts:
+        by_letter.setdefault(item[1], []).append(item)
+    if not all(k in by_letter for k in ("A", "B", "C", "D")):
+        return None
+    
+    # Find strictly ordered combo (A, B, C, D)
+    best_combo = None
+    for a in by_letter["A"]:
+        for b in by_letter["B"]:
+            if (b[0], b[3]) <= (a[0], a[3] + 5): continue
+            for c in by_letter["C"]:
+                if (c[0], c[3]) <= (b[0], b[3] + 5): continue
+                for d in by_letter["D"]:
+                    if (d[0], d[3]) <= (c[0], c[3] + 5): continue
+                    xs = [a[2], b[2], c[2], d[2]]
+                    # 1-column layout: all option labels aligned near left edge
+                    if max(xs) - min(xs) < 30 and max(xs) < 220:
+                        best_combo = (a, b, c, d)
+                        break
+                if best_combo: break
+            if best_combo: break
+        if best_combo: break
+        
+    if not best_combo:
+        return None
+    
+    a, b, c, d = best_combo
+    opts_raw = [("A", a), ("B", b), ("C", c), ("D", d)]
+    opt_slices = []
+    for idx, (letter, item) in enumerate(opts_raw):
+        pi = item[0]
+        y_top = item[3] - 1
+        if idx + 1 < len(opts_raw):
+            next_item = opts_raw[idx + 1][1]
+            if next_item[0] == pi:
+                y_bot = next_item[3] - 1
+            else:
+                part_pi = next((p for p in parts if p[0] == pi), None)
+                y_bot = part_pi[2] if part_pi else item[5] + 50
+        else:
+            part_pi = next((p for p in reversed(parts) if p[0] == pi), None)
+            y_bot = part_pi[2] if part_pi else item[5] + 50
+        
+        h = max(0, y_bot - y_top)
+        min_x, max_x = get_ink_bounds(src[pi], y_top, y_bot, x0, x1)
+        opt_slices.append({
+            "letter": letter,
+            "pi": pi,
+            "y0": y_top,
+            "y1": y_bot,
+            "h": h,
+            "min_x": min_x,
+            "max_x": max_x,
+            "w": max(80, max_x - x0 + 10)
+        })
+    
+    max_h = max(s["h"] for s in opt_slices)
+    tot_h = sum(s["h"] for s in opt_slices)
+    max_w = max(s["w"] for s in opt_slices)
+    
+    # Must be "big" options (structures/tall), and option width must fit nicely into half-column (w <= 270)
+    if (max_h > 35 or tot_h > 120) and max_w <= 270:
+        stem_parts = []
+        for p in parts:
+            if p[0] < a[0]:
+                stem_parts.append(p)
+            elif p[0] == a[0]:
+                if p[1] < a[3] - 1:
+                    stem_parts.append((p[0], p[1], min(p[2], a[3] - 1)))
+        return stem_parts, opt_slices
+    
+    return None
+
+
 def parse_answers(path):
     """{qno: 'B'} read from an Answers/Hints/Solutions PDF: the token(s) after 'N.' before 'Sol.'"""
     out = {}
@@ -142,29 +253,112 @@ class Sheet:
         """Section heading inside the question list (kept together with the question after it)."""
         self.section(text, need=200)
 
-    def _place(self, label, tag, src, parts, x0, x1):
+    def _place(self, label, tag, src, parts, x0=CROP_X0, x1=CROP_X1):
         """Draw the clips of `src` (columns x0..x1) under a margin label; return where they landed."""
+        CW = x1 - x0
+        x_left = MX + LABEL_W
+        col_gap = 14.0
+        col_w = (CW - col_gap) / 2
+
+        # 1. Check for 1-column vertical big options -> 2x2 grid reflow + scaling
+        opt_info = detect_vertical_big_options(src, parts, x0, x1)
+        if opt_info:
+            stem_parts, opt_slices = opt_info
+            stem_heights = [b - a for (_, a, b) in stem_parts]
+            stem_tot = sum(stem_heights)
+            stem_scale = max(0.75, min(1.0, 200.0 / stem_tot)) if stem_tot > 200 else 1.0
+            
+            hA, hB, hC, hD = [s["h"] for s in opt_slices]
+            max_opt_h = max(hA, hB, hC, hD)
+            opt_scale = max(0.68, min(0.80, 85.0 / max_opt_h))
+            
+            row1_h = max(hA, hB) * opt_scale
+            row2_h = max(hC, hD) * opt_scale
+            
+            tot_needed = (stem_tot * stem_scale) + row1_h + row2_h + 16.0
+            if self.page is None or self.y + min(tot_needed, 120) > BOT:
+                self.new_page()
+            
+            lab_pno = len(self.doc) - 1
+            lab_y = self.y
+            segs = []
+            start_y = self.y
+            
+            # Place stem
+            for (pi, a, b), sh in zip(stem_parts, stem_heights):
+                scaled_h = sh * stem_scale
+                if self.y + scaled_h > BOT:
+                    self.new_page()
+                rect = fitz.Rect(x_left, self.y, x_left + CW * stem_scale, self.y + scaled_h)
+                self.page.show_pdf_page(rect, src, pi, clip=fitz.Rect(x0, a, x1, b))
+                self.y += scaled_h
+            if stem_parts:
+                self.y += 6.0
+                
+            # Place Row 1: Option A and Option B
+            if self.y + row1_h > BOT:
+                self.new_page()
+            sA = opt_slices[0]
+            wA = min(col_w, sA["w"] * opt_scale)
+            rect_A = fitz.Rect(x_left, self.y, x_left + wA, self.y + sA["h"] * opt_scale)
+            self.page.show_pdf_page(rect_A, src, sA["pi"], clip=fitz.Rect(x0, sA["y0"], x0 + sA["w"], sA["y1"]))
+
+            sB = opt_slices[1]
+            wB = min(col_w, sB["w"] * opt_scale)
+            rect_B = fitz.Rect(x_left + col_w + col_gap, self.y, x_left + col_w + col_gap + wB, self.y + sB["h"] * opt_scale)
+            self.page.show_pdf_page(rect_B, src, sB["pi"], clip=fitz.Rect(x0, sB["y0"], x0 + sB["w"], sB["y1"]))
+            self.y += row1_h + 6.0
+            
+            # Place Row 2: Option C and Option D
+            if self.y + row2_h > BOT:
+                self.new_page()
+            sC = opt_slices[2]
+            wC = min(col_w, sC["w"] * opt_scale)
+            rect_C = fitz.Rect(x_left, self.y, x_left + wC, self.y + sC["h"] * opt_scale)
+            self.page.show_pdf_page(rect_C, src, sC["pi"], clip=fitz.Rect(x0, sC["y0"], x0 + sC["w"], sC["y1"]))
+
+            sD = opt_slices[3]
+            wD = min(col_w, sD["w"] * opt_scale)
+            rect_D = fitz.Rect(x_left + col_w + col_gap, self.y, x_left + col_w + col_gap + wD, self.y + sD["h"] * opt_scale)
+            self.page.show_pdf_page(rect_D, src, sD["pi"], clip=fitz.Rect(x0, sD["y0"], x0 + sD["w"], sD["y1"]))
+            self.y += row2_h + GAP
+            
+            segs.append([len(self.doc) - 1, round(start_y, 2), round(self.y, 2)])
+            self.doc[lab_pno].insert_text((MX, lab_y + 11), label, fontsize=10.5, fontname="hebo", color=NAVY)
+            self.doc[lab_pno].insert_text((MX, lab_y + 21), tag, fontsize=5.5, fontname="helv", color=GREY)
+            return segs
+
+        # 2. Otherwise: Standard placement with auto-scale for oversized questions
         heights = [b - a for (_, a, b) in parts]
-        total = sum(heights) + GAP
+        tot_h = sum(heights)
+        q_scale = max(0.72, min(1.0, 210.0 / tot_h)) if tot_h > 210.0 else 1.0
+        
+        scaled_heights = [h * q_scale for h in heights]
+        total = sum(scaled_heights) + GAP
         if self.page is None or self.y + min(total, 120) > BOT:
             self.new_page()
+            
+        lab_pno = len(self.doc) - 1
         lab_y = self.y
         first = True
         segs = []
-        for (pi, a, b), h in zip(parts, heights):
+        for (pi, a, b), h in zip(parts, scaled_heights):
             if self.y + h > BOT:
                 self.new_page()
                 if first:
+                    lab_pno = len(self.doc) - 1
                     lab_y = self.y
             if first:
+                lab_pno = len(self.doc) - 1
                 lab_y = self.y
                 first = False
-            rect = fitz.Rect(MX + LABEL_W, self.y, MX + LABEL_W + (x1 - x0), self.y + h)
+            rect = fitz.Rect(x_left, self.y, x_left + CW * q_scale, self.y + h)
             self.page.show_pdf_page(rect, src, pi, clip=fitz.Rect(x0, a, x1, b))
             segs.append([len(self.doc) - 1, round(self.y, 2), round(self.y + h, 2)])
             self.y += h
-        self.page.insert_text((MX, lab_y + 11), label, fontsize=10.5, fontname="hebo", color=NAVY)
-        self.page.insert_text((MX, lab_y + 21), tag, fontsize=5.5, fontname="helv", color=GREY)
+            
+        self.doc[lab_pno].insert_text((MX, lab_y + 11), label, fontsize=10.5, fontname="hebo", color=NAVY)
+        self.doc[lab_pno].insert_text((MX, lab_y + 21), tag, fontsize=5.5, fontname="helv", color=GREY)
         self.y += GAP
         return segs
 
