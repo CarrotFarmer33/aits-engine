@@ -54,6 +54,16 @@ TYPE_NAME.update({
 def norm(s):
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
+def has_valid_answer(q):
+    """Check if question has a confirmed, non-empty answer in the database."""
+    a = q.get("answer") or q.get("ans") or q.get("correct_answer") or q.get("correct") or q.get("key")
+    if a is None:
+        return False
+    if isinstance(a, list):
+        return len(a) > 0 and any(str(x).strip() not in ("", "-", "None", "null", "?") for x in a)
+    s = str(a).strip()
+    return s not in ("", "-", "None", "null", "?", "NA", "N/A", "none")
+
 def get_paper(q, db_path=""):
     exam = q.get("exam")
     if exam:
@@ -105,6 +115,8 @@ class QuestionManager:
                     data = json.load(f)
                 qs = data.get("questions", data if isinstance(data, list) else [])
                 for q in qs:
+                    if not has_valid_answer(q):
+                        continue
                     qid = q.get("id")
                     if qid and qid not in self.q_by_id:
                         q["paper"] = get_paper(q, p)
@@ -161,7 +173,7 @@ class QuestionManager:
         return max(c, key=lambda k: len(self.nkeys[k])) if c else None
 
 def fmt_answer(x):
-    a = x.get("answer") or x.get("ans")
+    a = x.get("answer") or x.get("ans") or x.get("correct_answer") or x.get("correct") or x.get("key")
     if a is None or a == "":
         return "-"
     if isinstance(a, list):
