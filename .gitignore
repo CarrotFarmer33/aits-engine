@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+generated_tests/*.pdf
+!generated_tests/.gitkeep
+.DS_Store
+Thumbs.db
