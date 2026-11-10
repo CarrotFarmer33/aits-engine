@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""server.py - Cloud API Backend for AITS Practice Portal Vector PDF Generator.
+"""server.py - Full-stack HTTP Server for AITS Practice Portal with Vector Test Sheet Generator.
 
-Deployable to Render, Railway, Fly.io, or any Docker container.
-Crops vector questions and solutions directly from source PDFs using PyMuPDF.
+Serves static assets from aitsver2-main and provides the /api/build-test endpoint
+which crops native vector questions and solutions directly from source PDFs
+using PyMuPDF with zero rasterization, crisp selectable text, and clean watermark removal.
 """
 
 import http.server
@@ -15,36 +16,23 @@ import time
 import urllib.parse
 
 from build_vector_test import build_test_pdf, QuestionManager
+from build_sheets import CROP_X0, CROP_X1, remove_watermarks, open_pdf
+import pymupdf as fitz
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-GENERATED_DIR = os.path.join(ROOT_DIR, "generated_tests")
+SITE_DIR = os.path.join(ROOT_DIR, "aitsver2-main")
+GENERATED_DIR = os.path.join(SITE_DIR, "generated_tests")
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
 # Pre-load question manager in background thread on startup
 threading.Thread(target=QuestionManager.get_instance, daemon=True).start()
 
-def cleanup_old_pdfs():
-    """Periodically remove PDFs older than 1 hour to prevent disk growth."""
-    while True:
-        try:
-            now = time.time()
-            for fname in os.listdir(GENERATED_DIR):
-                if fname.endswith(".pdf") and fname != "latest_test.pdf":
-                    fpath = os.path.join(GENERATED_DIR, fname)
-                    if os.path.isfile(fpath) and (now - os.path.getmtime(fpath) > 3600):
-                        try:
-                            os.remove(fpath)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        time.sleep(900)  # Sweep every 15 minutes
+class AitsRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=SITE_DIR, **kwargs)
 
-threading.Thread(target=cleanup_old_pdfs, daemon=True).start()
-
-class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
-        # Enable full CORS for web portal
+        # Enable CORS for local testing
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept")
@@ -59,68 +47,118 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path in ("/", "/api", "/health"):
+        if path in ("/health", "/api/health"):
             self.send_json({
                 "ok": True,
-                "service": "AITS Vector PDF Engine",
+                "service": "AITS Practice Portal Server",
                 "status": "online",
                 "timestamp": int(time.time())
             })
             return
-
-        if path == "/api/status":
+        elif path == "/api/status":
             self.handle_status()
             return
-
-        if path.startswith("/generated_tests/"):
-            self.handle_serve_pdf(path)
+        elif path == "/api/chapters":
+            self.handle_chapters()
+            return
+        elif path.startswith("/api/question-svg/"):
+            qid = path.split("/api/question-svg/")[1].strip()
+            self.handle_question_svg(qid)
             return
 
-        self.send_json({"ok": False, "error": f"Endpoint '{path}' not found"}, 404)
+        # Serve static files from SITE_DIR
+        return super().do_GET()
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path in ("/api/build-test", "/api/build-sheet"):
+        if path == "/api/build-test" or path == "/api/build-sheet":
             self.handle_build_test()
             return
 
-        self.send_json({"ok": False, "error": f"Endpoint '{path}' not found"}, 404)
+        self.send_error(404, "Endpoint not found")
 
     def handle_status(self):
         qm = QuestionManager.get_instance()
-        cached_count = len(qm.segments_cache.get("questions", {})) + len(qm.segments_cache.get("solutions", {}))
         payload = {
             "ok": True,
-            "status": "ready",
             "totalQuestions": len(qm.questions),
             "questionPdfs": len(qm.pdfs),
-            "solutionPdfs": len(qm.sol_files),
-            "cachedSegments": cached_count,
-            "engineVersion": "2.0-cached"
+            "solutionPdfs": len(qm.sol_files)
         }
         self.send_json(payload)
 
-    def handle_serve_pdf(self, path):
-        # Extract filename safely
-        fname = os.path.basename(path)
-        fpath = os.path.join(GENERATED_DIR, fname)
-        if not os.path.isfile(fpath):
-            self.send_json({"ok": False, "error": "PDF not found or expired"}, 404)
-            return
+    def handle_chapters(self):
+        qm = QuestionManager.get_instance()
+        by_sub = {}
+        for q in qm.questions:
+            sub = q.get("subject") or "Physics"
+            ch = q.get("chapter") or "General"
+            by_sub.setdefault(sub, set()).add(ch)
+        
+        result = {sub: sorted(list(chs)) for sub, chs in by_sub.items()}
+        self.send_json({"ok": True, "subjects": result})
 
+    def handle_question_svg(self, qid):
+        import build_vector_test as bvt
+        qm = QuestionManager.get_instance()
+        q = qm.q_by_id.get(qid)
+        if not q:
+            self.send_error(404, "Question not found")
+            return
+        key = qm.find_pdf_key(q)
+        if not key or key not in qm.pdfs:
+            self.send_error(404, "PDF paper not found for question")
+            return
+        q_cache = qm.segments_cache.get("questions", {}).get(key, {})
+        by_sub = q_cache.get("by_sub", {})
+        by_no = q_cache.get("by_no", {})
+        qno = q.get("questionNumber") or q.get("number") or 1
+        sub_name = str(q.get("subject", "")).strip().lower()
+        parts = bvt.find_question_parts(by_sub, by_no, sub_name, qno)
+        if not parts:
+            self.send_error(404, "Crop parts not found for question")
+            return
+        doc = open_pdf(qm.pdfs[key])
+        if not doc:
+            self.send_error(500, "Could not open source PDF")
+            return
         try:
-            with open(fpath, "rb") as f:
-                content = f.read()
+            remove_watermarks(doc)
+            w = CROP_X1 - CROP_X0
+            tot_h = sum(b - a for _, a, b in parts)
+            temp_doc = fitz.open()
+            temp_page = temp_doc.new_page(width=w, height=tot_h)
+            cur_y = 0
+            for pno, a, b in parts:
+                h = b - a
+                clip_r = fitz.Rect(CROP_X0, a, CROP_X1, b)
+                target_r = fitz.Rect(0, cur_y, w, cur_y + h)
+                temp_page.show_pdf_page(target_r, doc, pno, clip=clip_r)
+                cur_y += h
+            # Use text_as_path=1 to preserve the authentic original exam typography,
+            # exact font shapes, equations, and serif glyphs from the paper.
+            svg = temp_page.get_svg_image(text_as_path=1)
+            temp_doc.close()
+
+            # Ensure crisp opaque white background card so text is never transparent against dark modals/surfaces
+            insert_pos = svg.find(">") + 1
+            if insert_pos > 0:
+                bg_rect = f'<rect width="{w}" height="{tot_h}" fill="#ffffff"/>'
+                svg = svg[:insert_pos] + bg_rect + svg[insert_pos:]
+            
+            body = svg.encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", "application/pdf")
-            self.send_header("Content-Length", str(len(content)))
-            self.send_header("Content-Disposition", f'inline; filename="{fname}"')
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
-            self.wfile.write(content)
+            self.wfile.write(body)
         except Exception as e:
-            self.send_json({"ok": False, "error": str(e)}, 500)
+            self.send_error(500, f"Error rendering SVG: {e}")
+        finally:
+            doc.close()
 
     def handle_build_test(self):
         content_len = int(self.headers.get("Content-Length", 0))
@@ -139,6 +177,7 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
         subjects = req.get("subjects", [])
         pattern = req.get("pattern", "adv")
         paper = req.get("paper", "all")
+        subjects = req.get("subjects", [])
         num_subjs = len(subjects) if subjects else 3
         default_count = (num_subjs * 25) if pattern == "main" else 30
         count = int(req.get("count") or default_count)
@@ -153,7 +192,6 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
         out_pdf = os.path.join(GENERATED_DIR, out_filename)
 
         try:
-            t0 = time.time()
             res = build_test_pdf(
                 chapters=chapters,
                 subjects=subjects,
@@ -168,7 +206,6 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
                 out_pdf=out_pdf,
                 shuffle=True
             )
-            duration = round(time.time() - t0, 2)
 
             pdf_url = f"/generated_tests/{out_filename}"
             latest_url = "/generated_tests/latest_test.pdf"
@@ -180,8 +217,7 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
                 "filename": out_filename,
                 "totalQuestions": res["total_questions"],
                 "totalPages": res["total_pages"],
-                "answerCount": res["answer_count"],
-                "durationSeconds": duration
+                "answerCount": res["answer_count"]
             })
         except Exception as e:
             import traceback
@@ -198,11 +234,14 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
 
 def run(port=8000):
     mimetypes.add_type("application/pdf", ".pdf")
+    mimetypes.add_type("application/javascript", ".js")
+    mimetypes.add_type("text/css", ".css")
     mimetypes.add_type("application/json", ".json")
 
     server_address = ("", port)
-    httpd = http.server.ThreadingHTTPServer(server_address, AitsEngineHandler)
-    print(f"AITS Vector PDF Engine running on port {port}")
+    httpd = http.server.ThreadingHTTPServer(server_address, AitsRequestHandler)
+    print(f"AITS Practice Portal Server running at http://localhost:{port}/")
+    print(f"Serving site from: {SITE_DIR}")
     print(f"Generated PDFs stored in: {GENERATED_DIR}")
     try:
         httpd.serve_forever()
@@ -211,5 +250,5 @@ def run(port=8000):
         httpd.server_close()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8000))
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     run(port)
