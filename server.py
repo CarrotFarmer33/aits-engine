@@ -90,12 +90,15 @@ class AitsEngineHandler(http.server.BaseHTTPRequestHandler):
 
     def handle_status(self):
         qm = QuestionManager.get_instance()
+        cached_count = len(qm.segments_cache.get("questions", {})) + len(qm.segments_cache.get("solutions", {}))
         payload = {
             "ok": True,
             "status": "ready",
             "totalQuestions": len(qm.questions),
             "questionPdfs": len(qm.pdfs),
-            "solutionPdfs": len(qm.sol_files)
+            "solutionPdfs": len(qm.sol_files),
+            "cachedSegments": cached_count,
+            "engineVersion": "2.0-cached"
         }
         self.send_json(payload)
 
