@@ -160,42 +160,80 @@ def chem_segments(src):
         drs = page.get_drawings()
         page_data[pi] = (ws, drs)
 
+    # PASS 1: Compute clean, exact question start boundaries using interval gap analysis
+    start_tops = {}
+    MATH_LOOKBACK = 75
+    for k, (pi, y, n, q_x0) in enumerate(chain):
+        prev_q = chain[k - 1] if k > 0 else None
+        
+        # Determine strict floor on page pi (above which this question cannot reach)
+        prior_floor = prev_q[1] + 4 if (prev_q and prev_q[0] == pi) else SRC_TOP
+        prior_stops = [s for s in stops.get(pi, []) if s < y - 4]
+        if prior_stops:
+            prior_floor = max(prior_floor, max(prior_stops) + 2)
+
+        ws, drs = page_data[pi]
+        body_x0 = q_x0 + 8
+
+        # If there is a previous question on the same page, find the exact whitespace gap
+        # between the bottom of the previous question and the top of this question's equation/ink.
+        if prev_q and prev_q[0] == pi:
+            intervals = []
+            for w in ws:
+                if 60 <= w[0] <= 550 and prev_q[1] <= w[1] <= y + 4:
+                    intervals.append((w[1], w[3]))
+            for d in drs:
+                r = d["rect"]
+                if r.width < 450 and 60 <= r.x0 <= 550 and prev_q[1] <= r.y0 <= y + 4:
+                    intervals.append((r.y0, r.y1))
+            intervals.sort()
+            merged = []
+            for top, bot in intervals:
+                if merged and top <= merged[-1][1] + 2:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], bot))
+                else:
+                    merged.append((top, bot))
+            
+            # If multiple ink clusters exist between prev_q and y, the last cluster belongs
+            # to this question (e.g. reagents like CH3COONa above an arrow), and the gap before
+            # it marks the true boundary dividing the questions.
+            if len(merged) >= 2:
+                gap_bot = merged[-2][1]
+                gap_top = merged[-1][0]
+                if gap_top - gap_bot >= 3:
+                    start_tops[k] = (gap_bot + gap_top) / 2
+                    continue
+
+        tall_words = [
+            w[1] for w in ws
+            if w[0] > body_x0 and prior_floor <= w[1] <= y + 2 and w[1] >= y - MATH_LOOKBACK
+        ]
+        tall_drawings = [
+            d["rect"].y0 for d in drs
+            if d["rect"].x0 > body_x0 and d["rect"].width < 450
+            and prior_floor <= d["rect"].y0 <= y + 2 and d["rect"].y0 >= y - MATH_LOOKBACK
+        ]
+        candidates = tall_words + tall_drawings + [y]
+        start_tops[k] = max(prior_floor, min(candidates) - 4)
+
+    # PASS 2: Crop questions with zero equation clipping and zero previous-question bleed
     segs, segs_any = {}, {}
     page_last_ink = {}
     for k, (pi, y, n, q_x0) in enumerate(chain):
         nxt = chain[k + 1] if k + 1 < len(chain) else None
         
-        # Determine safe upper bound on page pi
+        y0 = start_tops[k]
         if pi in page_last_ink:
-            min_top = page_last_ink[pi] + 2
-        else:
-            prior_stops = [s for s in stops.get(pi, []) if s < y - 4]
-            min_top = max(prior_stops) + 2 if prior_stops else SRC_TOP
-
-        ws, drs = page_data[pi]
-        body_x0 = q_x0 + 8
-        # Include tall math / equations / reaction diagrams that sit above y.
-        # MATH_LOOKBACK=75 covers reaction arrows, multi-line equations, and
-        # structural formula rows that can span 50-70 pt above the question number.
-        MATH_LOOKBACK = 75
-        tall_words = [
-            w[1] for w in ws
-            if w[0] > body_x0 and min_top <= w[1] <= y + 2 and w[1] >= y - MATH_LOOKBACK
-        ]
-        tall_drawings = [
-            d["rect"].y0 for d in drs
-            if d["rect"].x0 > body_x0 and d["rect"].width < 450  # wider: catches reaction arrows
-            and min_top <= d["rect"].y0 <= y + 2 and d["rect"].y0 >= y - MATH_LOOKBACK
-        ]
-        
-        candidates = tall_words + tall_drawings + [y]
-        math_top = min(candidates)
-        y0 = max(min_top, math_top - 4)
+            y0 = max(y0, page_last_ink[pi] + 1)
 
         parts, p = [], pi
         while True:
             nq_here = nxt is not None and nxt[0] == p
-            lim = (nxt[1] - 4) if nq_here else SRC_BOT
+            if nq_here:
+                lim = start_tops[k + 1]
+            else:
+                lim = SRC_BOT
+
             hit = [s for s in stops.get(p, []) if y0 < s < lim]
             if hit:                                            # rough-work / section header: question ends
                 parts.append((p, y0, min(hit)))
