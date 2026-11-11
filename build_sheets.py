@@ -523,15 +523,8 @@ def remove_watermarks(doc):
         except Exception:
             pass
 
-        try:
-            for cx in page.get_contents():
-                stream = doc.xref_stream(cx)
-                if stream and b"/Pattern" in stream:
-                    cleaned_stream = pattern_block_re.sub(b"", stream)
-                    if len(cleaned_stream) != len(stream):
-                        doc.update_stream(cx, cleaned_stream)
-        except Exception:
-            pass
+        # Keep /Pattern stream intact to preserve diagram hatching and physical shading
+        pass
 
 
 def open_pdf(path):
