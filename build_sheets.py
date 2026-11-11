@@ -474,57 +474,27 @@ WATERMARK_WORDS = (
     "classroom / integrated", "for more join"
 )
 
-BANNER_LINE_RE = re.compile(
-    r'(?:section\s*[-–—]\s*[a-d1-4]|numerical\s*(?:answer|based)?|single\s*correct|'
-    r'one\s*options?\s*correct|one\s*or\s*more|matching\s*list|matrix\s*match|'
-    r'this\s*section\s*contains|space\s*for\s*rough|maximum\s*marks)',
-    re.IGNORECASE
-)
-
 def remove_watermarks(doc):
-    """Remove FIITJEE watermarks, footer text, telegram promotions, diagonal pattern watermarks,
-    as well as leftover section headers, instruction banners, and 'Space for Rough work' bars."""
+    """Remove FIITJEE watermarks, footer text, telegram promotions, and margin banners from PDF."""
     if doc is None:
         return
-    pattern_block_re = re.compile(rb"q\s+/Pattern\s+(?:cs|CS)[^Q]*?Q\s*", re.DOTALL)
     for page in doc:
         has_redaction = False
         try:
-            # 1. Redact watermark words and branding
             for b in page.get_text("blocks"):
                 text_lower = b[4].lower()
                 if any(w in text_lower for w in WATERMARK_WORDS):
                     page.add_redact_annot(fitz.Rect(b[:4]), fill=False)
                     has_redaction = True
-
-            # 2. Redact section headings, 'Numerical Answer', 'Single Correct', 'Section - A',
-            #    and 'Space for Rough work' divider bars line-by-line across the page column
-            d = page.get_text("dict")
-            for b in d.get("blocks", []):
-                if "lines" not in b:
-                    continue
-                for l in b["lines"]:
-                    ltxt = "".join(s["text"] for s in l["spans"]).strip()
-                    # Do not redact if line is a question number (e.g. "12.")
-                    if not re.match(r"^\s*\d{1,3}\.", ltxt) and BANNER_LINE_RE.search(ltxt):
-                        bbox = l["bbox"]
-                        # Redact across the full column width and expand slightly to wipe horizontal dividing bars
-                        r = fitz.Rect(60, bbox[1] - 8, 550, bbox[3] + 4)
-                        page.add_redact_annot(r, fill=False)
-                        has_redaction = True
-
             for annot in page.annots():
                 info = annot.info or {}
                 content = (str(info.get("content", "")) + " " + str(info.get("title", ""))).lower()
-                if any(w in content for w in WATERMARK_WORDS) or BANNER_LINE_RE.search(content):
+                if any(w in content for w in WATERMARK_WORDS):
                     page.delete_annot(annot)
             if has_redaction:
                 page.apply_redactions()
         except Exception:
             pass
-
-        # Keep /Pattern stream intact to preserve diagram hatching and physical shading
-        pass
 
 
 def open_pdf(path):
