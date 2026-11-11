@@ -475,7 +475,7 @@ WATERMARK_WORDS = (
 )
 
 def remove_watermarks(doc):
-    """Remove FIITJEE watermarks, footer text, telegram promotions, and margin banners from PDF."""
+    """Remove FIITJEE watermarks, footer text, telegram promotions, and diagonal grey pattern watermarks."""
     if doc is None:
         return
     for page in doc:
@@ -493,6 +493,20 @@ def remove_watermarks(doc):
                     page.delete_annot(annot)
             if has_redaction:
                 page.apply_redactions()
+        except Exception:
+            pass
+
+        # Clean diagonal grey /Pattern watermark blocks and Telegram banner streams
+        try:
+            for xref in page.get_contents():
+                stream = doc.xref_stream(xref).decode('latin1', errors='ignore')
+                if any(w in stream.lower() for w in ("@fiitjee", "for more join")):
+                    doc.update_stream(xref, b"")
+                    continue
+                if "/Pattern cs" in stream and "/Pattern" in stream:
+                    cleaned_stream = re.sub(r'q\s+/Pattern\s+cs\s+/Pattern[0-9A-Fa-f]+\s+scn[\s\S]*?f\*\s+Q\s*', '', stream)
+                    if cleaned_stream != stream:
+                        doc.update_stream(xref, cleaned_stream.encode('latin1'))
         except Exception:
             pass
 
