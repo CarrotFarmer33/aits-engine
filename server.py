@@ -20,7 +20,7 @@ from build_sheets import CROP_X0, CROP_X1, remove_watermarks, open_pdf
 import pymupdf as fitz
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SITE_DIR = os.path.join(ROOT_DIR, "aitsver2-main")
+SITE_DIR = os.path.join(ROOT_DIR, "aitsver2-main") if os.path.isdir(os.path.join(ROOT_DIR, "aitsver2-main")) else ROOT_DIR
 GENERATED_DIR = os.path.join(SITE_DIR, "generated_tests")
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
@@ -47,7 +47,7 @@ class AitsRequestHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path in ("/health", "/api/health"):
+        if path in ("/", "/health", "/api/health"):
             self.send_json({
                 "ok": True,
                 "service": "AITS Practice Portal Server",
@@ -250,5 +250,5 @@ def run(port=8000):
         httpd.server_close()
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    port = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 7860))
     run(port)
