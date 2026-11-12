@@ -168903,11 +168903,11 @@
     {
       "id": "chem_main_121",
       "subject": "Chemistry",
-      "chapter": "Liquid Solutions & Colligative Properties",
+      "chapter": "p-Block Elements",
       "type": "single",
       "question": "",
       "options": null,
-      "answer": "C",
+      "answer": "A",
       "solution": "",
       "images": [
         "zipimg:https://huggingface.co/datasets/anwehsh/aits-physics/resolve/main/vector_zips/Main.zip#chemistry_1.svg"
@@ -230112,7 +230112,7 @@
       "type": "numerical",
       "question": "",
       "options": null,
-      "answer": "1.50",
+      "answer": "3.33",
       "solution": "",
       "images": [
         "zipimg:https://huggingface.co/datasets/anwehsh/aits-physics/resolve/main/vector_zips/AITS-24_JEE_MAIN_18.07.2021.zip#chemistry_54.svg"
@@ -234793,11 +234793,11 @@
     {
       "id": "chem_main_2504",
       "subject": "Chemistry",
-      "chapter": "Ionic Equilibrium",
+      "chapter": "Redox Reactions",
       "type": "numerical",
       "question": "",
       "options": null,
-      "answer": "0.72",
+      "answer": "2.67",
       "solution": "",
       "images": [
         "zipimg:https://huggingface.co/datasets/anwehsh/aits-physics/resolve/main/vector_zips/AITS-9_JEE_MAIN_08.02.2021.zip#chemistry_55.svg"
@@ -268925,7 +268925,7 @@
       "type": "single",
       "question": "",
       "options": null,
-      "answer": "D",
+      "answer": "B",
       "solution": "",
       "images": [
         "zipimg:https://huggingface.co/datasets/anwehsh/aits-physics/resolve/main/vector_zips/AITS-2223-CRT-II-JEEM-OFFLINE.zip#chemistry_35.svg"
