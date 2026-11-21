@@ -30,13 +30,49 @@ from build_sheets import (
 from build_chem_sheets import chem_segments
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SOURCE_DIR = os.path.join(ROOT_DIR, "source")
-DB_PATHS = [
-    os.path.join(ROOT_DIR, "database.json"),
-    os.path.join(ROOT_DIR, "chemistry_database.json"),
-    os.path.join(ROOT_DIR, "maths_advanced_database.json"),
-    os.path.join(ROOT_DIR, "maths_main_database.json"),
+PARENT_DIR = os.path.dirname(ROOT_DIR)
+
+SOURCE_DIRS = []
+for base_anchor in [ROOT_DIR, os.path.dirname(os.path.abspath(sys.executable)), os.path.abspath(os.getcwd())]:
+    cur = base_anchor
+    for _ in range(6):
+        cand = os.path.join(cur, "source")
+        if os.path.isdir(cand) and cand not in SOURCE_DIRS:
+            SOURCE_DIRS.append(cand)
+        cand_engine = os.path.join(cur, "aits-engine", "source")
+        if os.path.isdir(cand_engine) and cand_engine not in SOURCE_DIRS:
+            SOURCE_DIRS.append(cand_engine)
+        next_cur = os.path.dirname(cur)
+        if next_cur == cur:
+            break
+        cur = next_cur
+
+SOURCE_DIR = SOURCE_DIRS[0] if SOURCE_DIRS else os.path.join(ROOT_DIR, "source")
+
+def resolve_db_path(filename):
+    for base in [
+        ROOT_DIR,
+        os.path.dirname(os.path.abspath(sys.executable)),
+        os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "_internal"),
+        os.path.join(ROOT_DIR, "aitsver2-main"),
+        os.path.join(ROOT_DIR, "aitsver2-main", "public"),
+        PARENT_DIR,
+        os.path.abspath(os.getcwd()),
+        os.path.join(os.path.abspath(os.getcwd()), "aitsver2-main")
+    ]:
+        cand = os.path.join(base, filename)
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(ROOT_DIR, filename)
+
+DB_NAMES = [
+    "database.json",
+    "chemistry_database.json",
+    "chemistry_main_database.json",
+    "maths_advanced_database.json",
+    "maths_main_database.json"
 ]
+DB_PATHS = [resolve_db_path(n) for n in DB_NAMES]
 
 TYPE_ORDER = [
     ("single", "Single Correct (MCQ)"),
@@ -131,18 +167,49 @@ class QuestionManager:
             except Exception as e:
                 print(f"Warning: could not load {p}: {e}")
         print(f"Indexed {len(self.questions)} questions across all databases in {time.time()-t0:.2f}s")
+        meta_p = resolve_db_path("db_meta.json")
+        if meta_p and os.path.exists(meta_p):
+            try:
+                with open(meta_p, "r", encoding="utf-8") as f:
+                    mdata = json.load(f)
+                mqs = mdata if isinstance(mdata, list) else mdata.get("questions", [])
+                added_meta = 0
+                for q in mqs:
+                    qid = q.get("id")
+                    if qid and qid not in self.q_by_id:
+                        if not has_valid_answer(q):
+                            continue
+                        q["paper"] = get_paper(q, meta_p)
+                        is_para = bool(q.get("paragraph") or q.get("type") == "paragraph" or q.get("paragraphId") or q.get("passageText") or q.get("passageImages"))
+                        if is_para:
+                            q["paragraph"] = True
+                            if not q.get("rawType"):
+                                q["rawType"] = q.get("type") or "single"
+                            q["type"] = "paragraph"
+                        self.q_by_id[qid] = q
+                        self.questions.append(q)
+                        added_meta += 1
+                if added_meta > 0:
+                    print(f"Indexed {added_meta} additional fallback questions from {meta_p}")
+            except Exception as me:
+                print(f"Notice: db_meta fallback: {me}")
 
     def _index_pdfs(self):
-        if not os.path.isdir(SOURCE_DIR):
-            print(f"Warning: source dir '{SOURCE_DIR}' not found")
+        if not SOURCE_DIRS:
+            print(f"Warning: no source directories found among {SOURCE_DIRS}")
             return
         t0 = time.time()
-        for p in walk_pdfs(SOURCE_DIR):
-            stem = os.path.splitext(os.path.basename(p))[0]
-            if SOL_RE.search(stem):
-                self.sol_files[stem] = p
-            else:
-                self.pdfs[stem] = p
+        seen = set()
+        for s_dir in SOURCE_DIRS:
+            for p in walk_pdfs(s_dir):
+                stem = os.path.splitext(os.path.basename(p))[0]
+                if stem in seen:
+                    continue
+                seen.add(stem)
+                if SOL_RE.search(stem):
+                    self.sol_files[stem] = p
+                else:
+                    self.pdfs[stem] = p
 
         self.nkeys = {k: norm(k) for k in self.pdfs}
 
@@ -274,7 +341,9 @@ def build_test_pdf(
     remove_watermark=True,
     selected_qids=None,
     out_pdf=None,
-    shuffle=True
+    shuffle=True,
+    crops=None,
+    **kwargs
 ):
     """Builds a vector test PDF with sub-second generation using pre-computed segments cache."""
     qm = QuestionManager.get_instance()
