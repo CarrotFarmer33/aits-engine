@@ -506,7 +506,8 @@ def remove_watermarks(doc):
                     doc.update_stream(xref, b"")
                     continue
                 if "/Pattern cs" in stream and "/Pattern" in stream:
-                    cleaned_stream = re.sub(r'q\s+/Pattern\s+cs\s+/Pattern[0-9A-Fa-f]+\s+scn[\s\S]*?f\*\s+Q\s*', '', stream)
+                    # Clean all diagonal FIITJEE vector watermark pattern fills safely by disabling path fill ('n' = no-op path end)
+                    cleaned_stream = re.sub(r'/Pattern\s+cs[\s\S]*?f\*?', 'n', stream)
                     if cleaned_stream != stream:
                         doc.update_stream(xref, cleaned_stream.encode('latin1'))
         except Exception:
